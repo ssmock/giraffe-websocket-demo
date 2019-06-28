@@ -9,7 +9,6 @@ open Microsoft.AspNetCore.Http
 open System.Threading.Tasks
 open Giraffe
 open System.Collections.Concurrent
-open Giraffe.GiraffeViewEngine
 
 type private LeasedSocket = {
     Id: Guid
@@ -109,7 +108,7 @@ let OpenWebSocket (next: HttpFunc) (ctx: HttpContext) = task {
         let! _finished = releaseSocket.Task 
                          |> Async.AwaitTask
         
-        printfn "Closing socket %A" id
+        printfn "Socket release: %A" id
 
         sockets.TryRemove id |> ignore
 
