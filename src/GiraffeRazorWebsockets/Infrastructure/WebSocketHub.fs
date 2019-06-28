@@ -9,11 +9,26 @@ open Microsoft.AspNetCore.Http
 open System.Threading.Tasks
 open Giraffe
 open System.Collections.Concurrent
+open System.IO
 
 type private LeasedSocket = {
     Id: Guid
     Socket: WebSocket
     Release: Unit -> unit
+}
+
+type private SocketMessageReceived =
+    | TextReceived of TextMessageReceived
+    | CloseReceived of CloseMessageReceived
+    | NothingReceived of unit
+and TextMessageReceived = {
+    Text: string
+    Timestamp: DateTime
+}
+and CloseMessageReceived = {
+    CloseStatus: WebSocketCloseStatus
+    CloseStatusDescription: string
+    Timestamp: DateTime
 }
 
 let private sockets = new ConcurrentDictionary<Guid, LeasedSocket>()
@@ -32,33 +47,69 @@ let private sendMessage (leasedSocket: LeasedSocket) (message: string) =
                 leasedSocket.Release ()
         }
 
+let private receive (s: WebSocket) (ct: CancellationToken) = async {
+    let buffer = new ArraySegment<byte>(Array.zeroCreate 4096)
+    use ms = new MemoryStream ()
+
+    let rec loadBuffer () = async {
+        ct.ThrowIfCancellationRequested ()
+        let! receipt = s.ReceiveAsync(buffer, ct)
+                       |> Async.AwaitTask
+        let time = DateTime.Now
+
+        ms.Write (buffer.Array, buffer.Offset, receipt.Count)
+
+        if receipt.EndOfMessage then return (receipt, time)
+        else return! loadBuffer ()
+    }
+
+    let! loaded, time = loadBuffer ()
+
+    return match loaded.MessageType with
+           | WebSocketMessageType.Text ->
+               ms.Seek(0L, SeekOrigin.Begin) |> ignore
+               use reader = new StreamReader(ms, Encoding.UTF8)
+               let str = reader.ReadToEnd()  
+
+               // Not sure why these are being received               
+               if str = "[object MessageEvent]" then
+                NothingReceived ()
+               else 
+                TextReceived { Text = str 
+                               Timestamp = time }
+           | WebSocketMessageType.Close ->
+               CloseReceived { CloseStatus = loaded.CloseStatus.Value
+                               CloseStatusDescription = loaded.CloseStatusDescription 
+                               Timestamp = time } 
+           | _ -> 
+               NothingReceived ()
+}
+
 let private registerSocket s =
     sockets.TryAdd (s.Id, s)
     |> ignore
 
     let rec listen () = async {
-        printfn "Listening!"
-
-        let buffer : byte[] = Array.zeroCreate 4096
         let! ct = Async.CancellationToken
-        let! receive = s.Socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct)
-                       |> Async.AwaitTask
+        let! received = receive s.Socket ct
 
-        if receive.CloseStatus.HasValue then
-            printfn "Received close request"
-
-            let! _close = s.Socket.CloseAsync(receive.CloseStatus.Value, receive.CloseStatusDescription, CancellationToken.None)
+        match received with
+        | TextReceived t ->
+            printfn "Received message at %s %s" (t.Timestamp.ToString()) t.Text
+            let! again = listen () 
+            return again
+        | CloseReceived cr -> 
+            printfn "Received close request at %s" (cr.Timestamp.ToString())
+            let! _close = s.Socket.CloseAsync(cr.CloseStatus, cr.CloseStatusDescription, CancellationToken.None)
                           |> Async.AwaitTask
-            return ()                      
-        else
-            printfn "Received something else"
-
+            return ()
+        | NothingReceived _ ->
             let! again = listen () 
             return again
     }
 
     listen ()
-    
+
 let SendToAll msg = task {
     for s in sockets do
         try
