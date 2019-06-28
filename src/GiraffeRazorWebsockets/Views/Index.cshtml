@@ -1,0 +1,68 @@
+<div id="app">
+    <p>Things</p>
+    <div>
+        <button id="close">Close</button>
+    </div>
+    <div>
+        <button id="open">Open</button>
+    </div>
+    <div>
+        <input id="msg" />
+        <button id="send">Send</button>
+    </div>
+</div>
+
+<script>
+    function openWs(socket, id) {
+        if (socket && (socket.readyState === 1 || socket.readyState === 0)) {
+            return socket;
+        }
+        
+        let newSocket = new WebSocket(`wss://localhost:5001/ws?id=${id}`);
+
+        newSocket.onerror = () => {
+            console.log("Socket error", arguments)
+        }
+
+        newSocket.onopen = () => {
+             console.log("Socket opened");
+        }
+
+        newSocket.onclose = () => {
+            console.log("Socket closed");
+        }
+
+        newSocket.onmessage = (m) => {
+             console.log(`Message`, m);
+        }
+
+        return newSocket;
+    }
+
+    window.addEventListener("DOMContentLoaded", () => {
+        let socket = null;
+    
+        const els = {
+            open: document.getElementById("open"),
+            close: document.getElementById("close"),
+            msg: document.getElementById("msg"),
+            send: document.getElementById("send"),
+        };
+
+        els.open.addEventListener("click", async () => {
+            const id = await fetch("https://localhost:5001/handshake", { method: "POST" })
+                                .then(resp => resp.headers.get("x-connection-id"));
+
+            socket = openWs(socket, id);
+        });
+
+        els.close.addEventListener("click", () => {
+            socket.close(1000, "Close requested by the user");
+        });
+
+        els.send.addEventListener("click", () => {
+            let m = els.msg.value;
+            socket.send(m);
+        });
+    });
+</script>
