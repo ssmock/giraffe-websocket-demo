@@ -8,6 +8,8 @@ open System.Threading
 open Microsoft.AspNetCore.Http
 open System.Threading.Tasks
 open Giraffe
+open System.Collections.Concurrent
+open Giraffe.GiraffeViewEngine
 
 type private LeasedSocket = {
     Id: Guid
@@ -15,11 +17,7 @@ type private LeasedSocket = {
     Release: Unit -> unit
 }
 
-let mutable private sockets = list<LeasedSocket>.Empty
-
-let private withoutSocket socket =
-    sockets
-    |> List.filter (fun { Id = id } -> socket.Id = id )
+let private sockets = new ConcurrentDictionary<Guid, LeasedSocket>()
 
 let private sendMessage (leasedSocket: LeasedSocket) (message: string) = 
         task {
@@ -31,12 +29,13 @@ let private sendMessage (leasedSocket: LeasedSocket) (message: string) =
                 do! socket.SendAsync(seg, WebSocketMessageType.Text, true, CancellationToken.None)
             else
                 printfn "Closed %A at %A" leasedSocket.Id DateTime.Now
-                sockets <- withoutSocket leasedSocket
+                sockets.TryRemove id |> ignore
                 leasedSocket.Release ()
         }
 
 let private registerSocket s =
-    sockets <- s :: sockets
+    sockets.TryAdd (s.Id, s)
+    |> ignore
 
     let rec listen () = async {
         printfn "Listening!"
@@ -64,9 +63,9 @@ let private registerSocket s =
 let SendToAll msg = task {
     for s in sockets do
         try
-            do! sendMessage s msg
+            do! sendMessage s.Value msg
         with
-            | _ -> sockets <- withoutSocket s
+            | _ -> sockets.TryRemove s.Key |> ignore
 }
 
 
@@ -112,7 +111,7 @@ let OpenWebSocket (next: HttpFunc) (ctx: HttpContext) = task {
         
         printfn "Closing socket %A" id
 
-        sockets <- withoutSocket socket
+        sockets.TryRemove id |> ignore
 
         return Some ctx
     | _ -> 
